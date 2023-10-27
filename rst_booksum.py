@@ -12,7 +12,7 @@ from booksum_transformers import (
 )
 from booksum_transformers import LEDForConditionalGeneration
 
-# load metric
+
 rouge = load_metric("rouge")
 
 train_dataset = load_dataset("kmfoda/booksum", split="train")
