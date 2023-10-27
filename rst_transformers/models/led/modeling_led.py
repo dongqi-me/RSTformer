@@ -15,6 +15,7 @@
 """ PyTorch LED model."""
 
 import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import pandas as pd
 import math
 import random
@@ -47,9 +48,11 @@ from ...utils import (
 from .configuration_led import LEDConfig
 from transformers import AutoTokenizer,AutoModel
 
-from ...DMRST_Parser.MUL_main_Infer import inference
-from ...DMRST_Parser.model_depth import ParsingNet
-from ...DMRST_Parser.RST2ATTEN import *
+# import sys
+# sys.path.append("DMRST_Parser")
+from ...rst_with_relation_govreport_parser.MUL_main_Infer import inference
+from ...rst_with_relation_govreport_parser.model_depth import ParsingNet
+from ...rst_with_relation_govreport_parser.RST2ATTEN import *
 
 SUMM_Tokenizer = AutoTokenizer.from_pretrained("allenai/led-large-16384", use_fast=True)
 bert_tokenizer = AutoTokenizer.from_pretrained("xlm-roberta-base", use_fast=True)
@@ -59,7 +62,7 @@ for name, param in bert_model.named_parameters():
     param.requires_grad = False
 ParsingNetModel = ParsingNet(bert_model, bert_tokenizer=bert_tokenizer)
 ParsingNetModel = ParsingNetModel.cuda()
-ParsingNetModel.load_state_dict(torch.load("../DMRST_Parser/depth_mode/Savings/multi_all_checkpoint.torchsave"))
+ParsingNetModel.load_state_dict(torch.load("../../RST_govreport/RSTWithRelation/rst_with_relation_elife_transformers/rst_with_relation_govreport_parser/depth_mode/Savings/multi_all_checkpoint.torchsave"))
 ParsingNetModel = ParsingNetModel.eval()
 
 
@@ -238,10 +241,21 @@ class LEDEncoderSelfAttention(nn.Module):
             float_mask.new_ones(size=float_mask.size()), float_mask, self.one_sided_attn_window_size
         )
         attn_scores += diagonal_mask
+        # pad local attention probs
+        # print("attn_scores",attn_scores[0])
+        # print("RST_Atten_Doc_Paded",RST_Atten_Doc_Paded[0])
         if RST_Atten_Doc_Paded is not None:
-            RST_Atten_Doc_Paded=torch.reshape(RST_Atten_Doc_Paded.repeat(16,1),(1,16384,16,1025))
+            RST_Atten_Doc_Paded=torch.reshape(RST_Atten_Doc_Paded.repeat(16,1),(1,8192,16,1025))
             attn_scores = torch.mul(attn_scores, RST_Atten_Doc_Paded.cuda())
         del RST_Atten_Doc_Paded
+
+        # print()
+        # print("XXXXX1111")
+        # print("attn_scores",attn_scores.shape)
+        # print("RST_Atten_Doc_Paded",RST_Atten_Doc_Paded.shape)
+        # print("XXXXX1111")
+        # print()
+        # attn_scores = attn_scores + rst_attn_scores
 
         assert list(attn_scores.size()) == [
             batch_size,
@@ -473,6 +487,7 @@ class LEDEncoderSelfAttention(nn.Module):
         input_tensor[:, -affected_seq_len:, :, -(affected_seq_len + 1) :] = torch.full_like(
             ending_input, -float("inf")
         ).where(ending_mask.bool(), ending_input)
+    #!!!!重点!!!!
     def _sliding_chunks_query_key_matmul(self, query: torch.Tensor, key: torch.Tensor, window_overlap: int):
         """
         Matrix multiplication of query and key tensors using with a sliding window attention pattern. This
@@ -500,11 +515,15 @@ class LEDEncoderSelfAttention(nn.Module):
         # bcyd: batch_size * num_heads x chunks x 2window_overlap x head_dim
         # bcxy: batch_size * num_heads x chunks x 2window_overlap x 2window_overlap
         diagonal_chunked_attention_scores = torch.einsum("bcxd,bcyd->bcxy", (query, key))  # multiply
+        # print("A")
+        # print("diagonal_chunked_attention_scores",diagonal_chunked_attention_scores.shape)
 
         # convert diagonals into columns
         diagonal_chunked_attention_scores = self._pad_and_transpose_last_two_dims(
             diagonal_chunked_attention_scores, padding=(0, 0, 0, 1)
         )
+        # print("B")
+        # print("diagonal_chunked_attention_scores",diagonal_chunked_attention_scores.shape)
 
         # allocate space for the overall attention matrix where the chunks are combined. The last dimension
         # has (window_overlap * 2 + 1) columns. The first (window_overlap) columns are the window_overlap lower triangles (attention from a word to
@@ -536,6 +555,10 @@ class LEDEncoderSelfAttention(nn.Module):
         diagonal_attention_scores = diagonal_attention_scores.view(
             batch_size, num_heads, seq_len, 2 * window_overlap + 1
         ).transpose(2, 1)
+
+
+        # print("C")
+        # print("diagonal_attention_scores",diagonal_attention_scores.shape)
 
         self._mask_invalid_locations(diagonal_attention_scores, window_overlap)
         return diagonal_attention_scores
@@ -1764,6 +1787,7 @@ class LEDEncoder(LEDPreTrainedModel):
                 f"`config.attention_window`: {attention_window}"
             )
             if input_ids is not None:
+                # padding 重要的
                 input_ids = nn.functional.pad(input_ids, (0, padding_len), value=pad_token_id)
             if inputs_embeds is not None:
                 input_ids_padding = inputs_embeds.new_full(
@@ -1837,6 +1861,7 @@ class LEDEncoder(LEDPreTrainedModel):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
         """
         Raw_sentence = SUMM_Tokenizer.batch_decode(input_ids,skip_special_tokens=True)
+        # print(Raw_sentence[0])
         chunks = []
         threshold = 1024
         for chunk in Raw_sentence[0].split('. '):
@@ -1850,20 +1875,35 @@ class LEDEncoder(LEDPreTrainedModel):
         for i in range(len(EDU_Breaks)):
             try:
                 RST_Atten = RST2ATTEN(bert_tokenizer, SUMM_Tokenizer, [chunks[i]], EDU_Breaks[i], Parsing_Tree[i], Relation_Values[i])
+                # print("RST_AttenR",RST_Atten)
             except:
                 RST_Atten_Doc = RST_Atten_Doc.append(pd.DataFrame(torch.zeros(len([SUMM_Tokenizer.tokenize(i, add_special_tokens=False) for i in [chunks[i]]]),1025).numpy()))
             else:
+                # print("RST_Atten_2_Window_Overleap(RST_Atten)",RST_Atten_2_Window_Overleap(RST_Atten))
                 RST_Atten_Doc = RST_Atten_Doc.append(RST_Atten_2_Window_Overleap(RST_Atten))
-
+                # RST_Atten_Doc = torch.tensor(RST_Atten_Doc.values)
+                # RST_Atten_Doc = torch.add(RST_Atten_Doc, 1)
+                # RST_Atten_Doc_Paded = torch.ones(2048, 1025)
+                # RST_Atten_Doc_Paded[:RST_Atten_Doc.shape[0], :] = RST_Atten_Doc
+        # RST_Atten_Doc = RST_Atten_Doc.reset_index().reindex(range(2048), fill_value=0)
         del Raw_sentence
+
+
         RST_Atten_Doc = torch.tensor(RST_Atten_Doc.values)
         RST_Atten_Doc = RST_Atten_Doc[:,:1025]
         RST_Atten_Doc = torch.add(RST_Atten_Doc, 1)
+        # if RST_Atten_Doc.shape[0]>2048:
+        #     RST_Atten_Doc = RST_Atten_Doc[:2048,:]
         RST_Atten_Doc = RST_Atten_Doc[:8192, :]
+        # print(RST_Atten_Doc)
         RST_Atten_Doc_Paded = torch.ones(8192,1025)
         RST_Atten_Doc_Paded[:RST_Atten_Doc.shape[0], :] = RST_Atten_Doc
-
         del RST_Atten_Doc
+        # print()
+        # print("AAA")
+        # print("RST_Atten_Doc", RST_Atten_Doc_Paded.shape)
+        # print("AAA")
+        # print()
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (

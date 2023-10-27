@@ -4,33 +4,35 @@ import random
 import torch
 from datasets import Dataset
 from datasets import load_dataset, load_metric
-from booksum_transformers import (
+from rst_transformers import (
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
     AutoTokenizer,
     AutoModelForSeq2SeqLM,
 )
-from booksum_transformers import LEDForConditionalGeneration
+from statistics import mean
+from rst_transformers import LEDForConditionalGeneration
 
-
+# load metric
 rouge = load_metric("rouge")
 
-train_dataset = load_dataset("kmfoda/booksum", split="train")
-val_dataset = load_dataset("kmfoda/booksum", split="validation")
+train_dataset = load_dataset("tomasg25/scientific_lay_summarisation", "elife", split="train")
+val_dataset = load_dataset("tomasg25/scientific_lay_summarisation", "elife", split="validation")
 
 # load tokenizer
 tokenizer = AutoTokenizer.from_pretrained("allenai/led-large-16384")
 
 # max encoder length for led
-encoder_max_length = 16384
-decoder_max_length = 1024
+encoder_max_length = 8192
+decoder_max_length = 512
 batch_size = 1
+noise_lambda = 0.2
 learning_rate = 3e-9
 weight_decay = 0.1
 num_train_epochs = 30
 random_seed = 3407
 
-def set_seed(seed: int = 3407):
+def set_seed(seed:int = 3407):
     np.random.seed(seed)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -39,12 +41,13 @@ def set_seed(seed: int = 3407):
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"Random seed set as {seed}")
+
 set_seed(random_seed)
 
 def process_data_to_model_inputs(batch):
     # tokenize the inputs and labels
     inputs = tokenizer(
-        batch["chapter"],
+        batch["article"],
         padding="max_length",
         truncation=True,
         max_length=encoder_max_length,
@@ -81,7 +84,7 @@ train_dataset = train_dataset.map(
     process_data_to_model_inputs,
     batched=True,
     batch_size=batch_size,
-    remove_columns=["chapter", "summary"],
+    remove_columns=["article", "summary"],
 )
 
 # map val data
@@ -89,7 +92,7 @@ val_dataset = val_dataset.map(
     process_data_to_model_inputs,
     batched=True,
     batch_size=batch_size,
-    remove_columns=["chapter", "summary"],
+    remove_columns=["article", "summary"],
 )
 
 # set Python list to PyTorch tensor
@@ -104,7 +107,6 @@ val_dataset.set_format(
     columns=["input_ids", "attention_mask", "global_attention_mask", "labels"],
 )
 
-
 # enable fp16 apex training
 training_args = Seq2SeqTrainingArguments(
     predict_with_generate=True,
@@ -117,15 +119,16 @@ training_args = Seq2SeqTrainingArguments(
     fp16=False,
     # fp16_backend="apex",
     output_dir="./",
-    logging_steps=1,
-    eval_steps=1500,
-    save_steps=1500,
+    logging_steps=256,
+    eval_steps=2048,
+    save_steps=2048,
     lr_scheduler_type="cosine",
     warmup_steps=1500,
-    save_total_limit=5,
-    gradient_accumulation_steps=1,
+    save_total_limit=3,
+    gradient_accumulation_steps=32,
     optim= "adafactor",
     load_best_model_at_end = True,
+    # label_smoothing_factor = 0.1,
     group_by_length=True,
     gradient_checkpointing= True,
     seed=3407
@@ -143,6 +146,7 @@ def compute_metrics(pred):
     rouge2_output = rouge.compute(predictions=pred_str, references=label_str, rouge_types=["rouge2"])["rouge2"].mid
     rougeL_output = rouge.compute(predictions=pred_str, references=label_str, rouge_types=["rougeL"])["rougeL"].mid
     rougeLsum_output = rouge.compute(predictions=pred_str, references=label_str, rouge_types=["rougeLsum"])["rougeLsum"].mid
+
     return {
         "rouge1_precision": round(rouge1_output.precision, 4),
         "rouge1_recall": round(rouge1_output.recall, 4),
@@ -165,14 +169,17 @@ def compute_metrics(pred):
 # load model + enable gradient checkpointing & disable cache for checkpointing
 led = LEDForConditionalGeneration.from_pretrained("allenai/led-large-16384", gradient_checkpointing=True, use_cache=False)
 
+#NoisyTune
+for name ,para in led.named_parameters():
+    led.state_dict()[name][:] +=(torch.rand(para.size())-0.5)*noise_lambda*torch.std(para)
+
 # set generate hyperparameters
 led.config.num_beams = 4
-led.config.max_length = 1024
-led.config.min_length = 256
+led.config.max_length = 512
+led.config.min_length = 128
 led.config.length_penalty = 2.0
 led.config.early_stopping = True
 led.config.no_repeat_ngram_size = 3
-
 
 # instantiate trainer
 trainer = Seq2SeqTrainer(
@@ -187,3 +194,10 @@ trainer = Seq2SeqTrainer(
 # start training
 # torch.autograd.set_detect_anomaly(True)
 trainer.train()
+
+# load tokenizer
+# tokenizer = LEDTokenizer.from_pretrained("patrickvonplaten/led-large-16384-pubmed")
+# model = LEDForConditionalGeneration.from_pretrained("patrickvonplaten/led-large-16384-pubmed").to("cuda").half()
+model = led.to("cuda")
+trainer.save_model()
+trainer.save_state()

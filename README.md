@@ -1,3 +1,3 @@
 # RSTformer
 
-I'm still working on clean up the code.
+Please download the RST parser from https://github.com/seq-to-mind/DMRST_Parser
